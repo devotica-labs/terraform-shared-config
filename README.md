@@ -6,6 +6,102 @@ Canonical reusable GitHub Actions workflows and Terraform tooling configs for th
 
 > **Why this repo exists.** One source of truth for the entire CI pipeline definition and tool configs. Bumping a tool version, tightening a gate, or adding a new check is a single PR here that propagates to every consumer on their next `@vX.Y.Z` bump.
 
+## How it fits together
+
+```mermaid
+flowchart LR
+    subgraph Consumers["Consumer repos under devotica-labs"]
+        MOD["terraform-aws-vpc<br/>terraform-aws-iam-role<br/>terraform-aws-rds<br/>...10 modules"]
+        PROJ["sample-infra<br/>client-A-infra<br/>client-B-infra"]
+    end
+
+    subgraph Shared["terraform-shared-config (this repo)"]
+        MCI["terraform-module-ci.yml<br/>reusable workflow"]
+        PCI["terraform-project-ci.yml<br/>reusable workflow"]
+        CFG["pre-commit · tflint · terraform-docs<br/>checkov · editorconfig"]
+    end
+
+    subgraph Policies["devotica-labs/terraform-policies"]
+        OPA["OPA / conftest rule pack<br/>mandatory tags · no public S3<br/>no IAM wildcards"]
+    end
+
+    subgraph AWS["External targets"]
+        REG["registry.terraform.io<br/>devotica-labs namespace"]
+        SBX["AWS Sandbox 911526871324<br/>+ client AWS accounts"]
+    end
+
+    MOD -->|workflow_call @v1| MCI
+    PROJ -->|workflow_call @v1| PCI
+    MOD -.->|references| CFG
+    PROJ -.->|references| CFG
+
+    MCI -->|conftest fetches| OPA
+    PCI -->|conftest fetches| OPA
+
+    MCI -->|publishes signed tags| REG
+    PCI -->|OIDC plan/apply| SBX
+
+    classDef shared fill:#1F4E79,color:#fff,stroke:#1F4E79;
+    classDef consumer fill:#eaf1f8,color:#1a1a1a,stroke:#2E75B6;
+    classDef pol fill:#dcfce7,color:#1a1a1a,stroke:#15803d;
+    classDef ext fill:#fef3c7,color:#1a1a1a,stroke:#854d0e;
+    class MCI,PCI,CFG shared;
+    class MOD,PROJ consumer;
+    class OPA pol;
+    class REG,SBX ext;
+```
+
+One PR here updates the CI pipeline for every consumer repo on their next `@vX.Y.Z` bump.
+
+## Module pipeline — what runs on every PR
+
+The `terraform-module-ci.yml` workflow runs this gauntlet on every pull request to a consumer module repo. Block-tier jobs gate the merge; inform-tier jobs post comments and never block.
+
+```mermaid
+flowchart LR
+    DEV["git push"] --> PRE["pre-commit hooks<br/>local"]
+    PRE --> PR["GitHub PR opened"]
+
+    PR --> FMT["fmt"]
+    FMT --> VAL["validate"]
+
+    VAL --> P2A["tflint<br/>+ AWS plugin"]
+    VAL --> P2B["tfsec<br/>HIGH/CRIT"]
+    VAL --> P2C["gitleaks<br/>secret scan"]
+    VAL --> P2D["terraform-docs<br/>verify README"]
+
+    VAL --> P3A["conftest<br/>OPA policies"]
+    VAL --> P3B["terraform test<br/>unit + contract"]
+
+    VAL --> P4A["checkov<br/>CIS/PCI/SOC2<br/>(informational)"]
+    VAL --> P4B["infracost<br/>cost diff comment<br/>(informational)"]
+    VAL --> P4C["examples build<br/>basic + complete"]
+
+    P2A --> GATE{"all<br/>block-tier<br/>green?"}
+    P2B --> GATE
+    P2C --> GATE
+    P2D --> GATE
+    P3A --> GATE
+    P3B --> GATE
+    P4C --> GATE
+    P4A -.->|comment| PR
+    P4B -.->|comment| PR
+
+    GATE -- yes --> REVIEW["non-author<br/>review"]
+    GATE -- no --> FAIL["blocked"]
+    FAIL --> PRE
+
+    REVIEW --> MERGE["merge to main"]
+    MERGE --> RELEASE["release.yml<br/>release-please<br/>cosign · SBOM"]
+
+    classDef block fill:#dcfce7,stroke:#15803d,color:#15803d;
+    classDef inform fill:#fef3c7,stroke:#854d0e,color:#854d0e;
+    classDef bad fill:#fbeaea,stroke:#8E2A2A,color:#8E2A2A;
+    class P4A,P4B inform;
+    class FAIL bad;
+    class GATE,REVIEW,MERGE block;
+```
+
 ## What's inside
 
 | Path | Purpose |
