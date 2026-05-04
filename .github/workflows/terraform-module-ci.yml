@@ -144,7 +144,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ec7ec24ff5cdc04eaeac28aa0a08acf42660b5cf # v2.3.6
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -155,7 +155,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: bridgecrewio/checkov-action@5db18cffb537f661db32a698c9c20fa7be9b9c95 # v12.2890.0
+      - uses: bridgecrewio/checkov-action@9201a8e6eaa919e3444d7c4ca691896efde4f033 # v12.3101.0
         with:
           directory: ${{ inputs.working-directory }}
           framework: terraform
@@ -263,7 +263,7 @@ jobs:
     needs: validate
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: infracost/actions/setup@d59dca8b95a4d1b9d24d49cca6b7aae9e89faae6 # v3.0.1
+      - uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
       - name: Infracost breakdown
