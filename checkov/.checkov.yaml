@@ -1,0 +1,26 @@
+# Devotica canonical Checkov config.
+#
+# Starts informational. Flip checkov-blocking=true in module-ci inputs once
+# the skip list is reviewed and trimmed. Every entry in `skip-check` MUST have
+# a comment explaining why — drift = decay.
+
+framework:
+  - terraform
+
+quiet: true
+
+# Soft fail at first; tighten over time.
+soft-fail: true
+
+# Industry baselines we explicitly target. Add PCI / HIPAA when client engagements need them.
+check:
+  - CKV_AWS    # AWS general
+  - CKV2_AWS   # AWS scenario-level checks
+
+skip-check:
+  # CKV_AWS_<id> — note: keep this list short and reviewed. Each skip needs justification.
+  # Example (delete this comment block before first commit if no skips needed):
+  # - CKV_AWS_18     # S3 access logging — covered by central logging module instead
+
+download-external-modules: false
+evaluate-variables: true

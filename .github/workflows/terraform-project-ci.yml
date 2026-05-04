@@ -1,0 +1,197 @@
+# Reusable CI workflow for Devotica project (mono) repos.
+#
+# Consumed by: github.com/devotica-labs/<client>-infra and devotica-labs/sample-infra.
+#
+# What's different from terraform-module-ci.yml:
+#   * Operates on N service folders (vpc/, s3/, rds/, ...) per the Foundation
+#     Plan §4 service-first layout. Plan/apply gates are per-service.
+#   * Pulls credentials via OIDC into the target AWS account (no long-lived keys).
+#   * Drift detection job — runs on a schedule from the consumer side.
+#   * No release-please. Project repos do not version themselves; they just apply.
+
+name: terraform-project-ci
+
+on:
+  workflow_call:
+    inputs:
+      terraform-version:
+        description: "Terraform version pin"
+        type: string
+        default: "1.9.5"
+      services:
+        description: "JSON array of service folder names to process (e.g. '[\"vpc\",\"s3\",\"rds\"]')"
+        type: string
+        required: true
+      environment:
+        description: "Target environment for plan/apply (dev, stg, prod)"
+        type: string
+        required: true
+      aws-region:
+        description: "AWS region"
+        type: string
+        default: "ap-south-1"
+      aws-role-arn:
+        description: "GitHubActionsTerraform IAM role ARN to assume via OIDC"
+        type: string
+        required: true
+      run-plan:
+        description: "Run terraform plan per service (default: yes on PR)"
+        type: boolean
+        default: true
+      run-apply:
+        description: "Run terraform apply per service (only on push to main)"
+        type: boolean
+        default: false
+      run-tflint:
+        type: boolean
+        default: true
+      run-tfsec:
+        type: boolean
+        default: true
+      run-checkov:
+        type: boolean
+        default: true
+      run-conftest:
+        type: boolean
+        default: true
+      run-infracost:
+        type: boolean
+        default: true
+      conftest-policy-ref:
+        type: string
+        default: "v1"
+    secrets:
+      INFRACOST_API_KEY:
+        required: false
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+  pull-requests: write
+
+jobs:
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@ec7ec24ff5cdc04eaeac28aa0a08acf42660b5cf
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # ----- per-service matrix: lint / sec / policy / plan / apply -----
+
+  service:
+    name: ${{ matrix.service }} ${{ inputs.environment }}
+    runs-on: ubuntu-22.04
+    needs: [fmt, gitleaks]
+    strategy:
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6
+        if: ${{ inputs.run-tflint }}
+        with:
+          tflint_version: v0.50.3
+
+      - name: tflint
+        if: ${{ inputs.run-tflint }}
+        working-directory: ${{ matrix.service }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init
+          tflint --format compact
+
+      - name: tfsec
+        if: ${{ inputs.run-tfsec }}
+        uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6
+        with:
+          working_directory: ${{ matrix.service }}
+          additional_args: --minimum-severity HIGH
+
+      - name: Checkov
+        if: ${{ inputs.run-checkov }}
+        uses: bridgecrewio/checkov-action@5db18cffb537f661db32a698c9c20fa7be9b9c95
+        with:
+          directory: ${{ matrix.service }}
+          framework: terraform
+          quiet: true
+          soft_fail: true # informational in projects too — refine later
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: tf-${{ matrix.service }}-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: terraform init
+        working-directory: ${{ matrix.service }}
+        run: terraform init -backend-config=backend/config.${{ inputs.environment }}.hcl -reconfigure
+
+      - name: Pull policy pack for conftest
+        if: ${{ inputs.run-conftest }}
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          repository: devotica-labs/terraform-policies
+          ref: ${{ inputs.conftest-policy-ref }}
+          path: .policies
+
+      - name: terraform plan
+        if: ${{ inputs.run-plan }}
+        working-directory: ${{ matrix.service }}
+        run: |
+          terraform plan -var-file=tfvars/${{ inputs.environment }}.tfvars -out=tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
+
+      - name: conftest (OPA policies)
+        if: ${{ inputs.run-conftest && inputs.run-plan }}
+        uses: instrumenta/conftest-action@v0.5.1
+        with:
+          files: ${{ matrix.service }}/tfplan.json
+          policy: .policies/policies/
+
+      - name: Infracost diff comment
+        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+        uses: infracost/actions/setup@d59dca8b95a4d1b9d24d49cca6b7aae9e89faae6
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Infracost run
+        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+        working-directory: ${{ matrix.service }}
+        run: |
+          infracost breakdown --path . --format json --out-file /tmp/infracost-${{ matrix.service }}.json
+          infracost comment github \
+            --path /tmp/infracost-${{ matrix.service }}.json \
+            --repo "${{ github.repository }}" \
+            --pull-request "${{ github.event.pull_request.number }}" \
+            --github-token "${{ github.token }}" \
+            --behavior update
+
+      - name: terraform apply
+        if: ${{ inputs.run-apply }}
+        working-directory: ${{ matrix.service }}
+        run: terraform apply -auto-approve -var-file=tfvars/${{ inputs.environment }}.tfvars

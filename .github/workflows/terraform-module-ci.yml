@@ -1,0 +1,283 @@
+# Reusable CI workflow for Devotica Terraform module repos.
+#
+# Consumed by: every github.com/devotica-labs/terraform-aws-* repo.
+#
+# Why this exists:
+#   One canonical pipeline definition for the entire module catalog.
+#   Bumping a tool version, adding a check, tightening a gate — single PR
+#   here propagates to all modules on next consumer-side @vX.Y.Z bump.
+#
+# Inputs let consumers turn individual jobs off when they don't apply
+# (e.g. a docs-only module skipping infracost). Defaults err on the strict side.
+
+name: terraform-module-ci
+
+on:
+  workflow_call:
+    inputs:
+      terraform-version:
+        description: "Terraform version pin"
+        type: string
+        default: "1.9.5"
+      working-directory:
+        description: "Path within the consuming repo to run from"
+        type: string
+        default: "."
+      run-terraform-test:
+        description: "Run native terraform test (unit + contract layers)"
+        type: boolean
+        default: true
+      run-tflint:
+        description: "Run tflint with AWS plugin"
+        type: boolean
+        default: true
+      run-tfsec:
+        description: "Run tfsec (HIGH/CRITICAL fail)"
+        type: boolean
+        default: true
+      run-checkov:
+        description: "Run Checkov (informational at first; flip to blocking once tuned)"
+        type: boolean
+        default: true
+      run-conftest:
+        description: "Run conftest with the OPA policy pack"
+        type: boolean
+        default: true
+      run-terraform-docs-check:
+        description: "Verify README terraform-docs section is up to date"
+        type: boolean
+        default: true
+      run-infracost:
+        description: "Post Infracost diff comment on PRs"
+        type: boolean
+        default: true
+      run-examples-build:
+        description: "Run terraform validate inside every examples/* subdirectory"
+        type: boolean
+        default: true
+      checkov-blocking:
+        description: "Fail the build on Checkov findings (default: inform-only)"
+        type: boolean
+        default: false
+      conftest-policy-ref:
+        description: "Git ref of devotica-labs/terraform-policies to use"
+        type: string
+        default: "v1"
+    secrets:
+      INFRACOST_API_KEY:
+        description: "Infracost API key (free tier ok)"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # -----------------------------------------------------------------
+  # Tier 1 — block: cheap, deterministic, shared across every layer.
+  # -----------------------------------------------------------------
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff
+        working-directory: ${{ inputs.working-directory }}
+
+  validate:
+    name: terraform validate
+    runs-on: ubuntu-22.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - name: terraform init (no backend)
+        run: terraform init -backend=false
+        working-directory: ${{ inputs.working-directory }}
+      - name: terraform validate
+        run: terraform validate
+        working-directory: ${{ inputs.working-directory }}
+
+  tflint:
+    name: tflint
+    if: ${{ inputs.run-tflint }}
+    runs-on: ubuntu-22.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.0.0
+        with:
+          tflint_version: v0.50.3
+      - name: tflint init (download AWS plugin)
+        run: tflint --init
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: tflint
+        run: tflint --recursive --format compact
+        working-directory: ${{ inputs.working-directory }}
+
+  tfsec:
+    name: tfsec
+    if: ${{ inputs.run-tfsec }}
+    runs-on: ubuntu-22.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6 # v1.0.3
+        with:
+          working_directory: ${{ inputs.working-directory }}
+          soft_fail: false
+          additional_args: --minimum-severity HIGH
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@ec7ec24ff5cdc04eaeac28aa0a08acf42660b5cf # v2.3.6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  checkov:
+    name: checkov
+    if: ${{ inputs.run-checkov }}
+    runs-on: ubuntu-22.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: bridgecrewio/checkov-action@5db18cffb537f661db32a698c9c20fa7be9b9c95 # v12.2890.0
+        with:
+          directory: ${{ inputs.working-directory }}
+          framework: terraform
+          quiet: true
+          soft_fail: ${{ !inputs.checkov-blocking }}
+
+  conftest:
+    name: conftest (OPA policies)
+    if: ${{ inputs.run-conftest }}
+    runs-on: ubuntu-22.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - name: Pull policy pack
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          repository: devotica-labs/terraform-policies
+          ref: ${{ inputs.conftest-policy-ref }}
+          path: .policies
+      - name: Render plan JSON
+        run: |
+          terraform init -backend=false
+          terraform plan -out=tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
+        working-directory: ${{ inputs.working-directory }}
+      - name: Run conftest
+        uses: instrumenta/conftest-action@v0.5.1
+        with:
+          files: ${{ inputs.working-directory }}/tfplan.json
+          policy: .policies/policies/
+
+  terraform-test:
+    name: terraform test (unit + contract)
+    if: ${{ inputs.run-terraform-test }}
+    runs-on: ubuntu-22.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - name: terraform init
+        run: terraform init -backend=false
+        working-directory: ${{ inputs.working-directory }}
+      - name: terraform test (unit)
+        run: terraform test -filter=tests/unit.tftest.hcl
+        working-directory: ${{ inputs.working-directory }}
+      - name: terraform test (contract)
+        run: terraform test -filter=tests/contract.tftest.hcl
+        working-directory: ${{ inputs.working-directory }}
+
+  terraform-docs:
+    name: terraform-docs verify
+    if: ${{ inputs.run-terraform-docs-check }}
+    runs-on: ubuntu-22.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: terraform-docs/gh-actions@aeae0038ed47a547e0c0fca5c059d3335f48fb25 # v1.3.0
+        with:
+          working-dir: ${{ inputs.working-directory }}
+          config-file: .terraform-docs.yml
+          fail-on-diff: true
+
+  examples-build:
+    name: examples build
+    if: ${{ inputs.run-examples-build }}
+    runs-on: ubuntu-22.04
+    needs: validate
+    strategy:
+      matrix:
+        example: [basic, complete]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - name: terraform init
+        run: terraform init -backend=false
+        working-directory: ${{ inputs.working-directory }}/examples/${{ matrix.example }}
+        continue-on-error: true # not every module ships both examples
+      - name: terraform validate
+        run: |
+          if [ -d "${{ inputs.working-directory }}/examples/${{ matrix.example }}" ]; then
+            cd "${{ inputs.working-directory }}/examples/${{ matrix.example }}"
+            terraform validate
+          else
+            echo "examples/${{ matrix.example }} not present — skipping"
+          fi
+
+  # -----------------------------------------------------------------
+  # Tier 2 — informational: posts results, never blocks the build.
+  # -----------------------------------------------------------------
+  infracost:
+    name: infracost (PR comment)
+    if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-22.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: infracost/actions/setup@d59dca8b95a4d1b9d24d49cca6b7aae9e89faae6 # v3.0.1
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+      - name: Infracost breakdown
+        run: |
+          if [ -d "${{ inputs.working-directory }}/examples/complete" ]; then
+            infracost breakdown \
+              --path "${{ inputs.working-directory }}/examples/complete" \
+              --format json --out-file /tmp/infracost.json
+            infracost comment github \
+              --path /tmp/infracost.json \
+              --repo "${{ github.repository }}" \
+              --pull-request "${{ github.event.pull_request.number }}" \
+              --github-token "${{ github.token }}" \
+              --behavior update
+          else
+            echo "examples/complete missing — skipping infracost"
+          fi

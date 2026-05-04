@@ -1,0 +1,73 @@
+# Devotica canonical terraform-docs config.
+#
+# Generates the Inputs/Outputs/Resources sections of the module README between
+# the BEGIN/END markers. The rest of the README is hand-written.
+
+formatter: markdown table
+
+version: ">= 0.18, < 1.0"
+
+header-from: main.tf
+footer-from: ""
+
+recursive:
+  enabled: false
+
+sections:
+  hide: []
+  show:
+    - header
+    - requirements
+    - providers
+    - modules
+    - resources
+    - inputs
+    - outputs
+
+content: |-
+  {{ .Header }}
+
+  ## Requirements
+  {{ .Requirements }}
+
+  ## Providers
+  {{ .Providers }}
+
+  ## Modules
+  {{ .Modules }}
+
+  ## Resources
+  {{ .Resources }}
+
+  ## Inputs
+  {{ .Inputs }}
+
+  ## Outputs
+  {{ .Outputs }}
+
+output:
+  file: README.md
+  mode: inject
+  template: |-
+    <!-- BEGIN_TF_DOCS -->
+    {{ .Content }}
+    <!-- END_TF_DOCS -->
+
+settings:
+  anchor: true
+  color: true
+  default: true
+  description: false
+  escape: true
+  hide-empty: false
+  html: true
+  indent: 2
+  lockfile: true
+  read-comments: true
+  required: true
+  sensitive: true
+  type: true
+
+sort:
+  enabled: true
+  by: required

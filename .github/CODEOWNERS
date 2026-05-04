@@ -1,0 +1,5 @@
+# Default owner for all files
+* @devotica-labs/cloud-leads
+
+# Workflows are security-sensitive — additional reviewer
+/.github/workflows/ @devotica-labs/cloud-leads @devotica-labs/security
