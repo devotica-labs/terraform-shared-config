@@ -1,0 +1,129 @@
+# Reusable daily drift-detection workflow for project monorepos.
+#
+# Consumed by: every devotica-labs/<client>-infra and sample-infra repo.
+# Runs `terraform plan -detailed-exitcode` per service per environment;
+# exit code 2 (drift detected) opens a GitHub issue and fails the run so
+# it surfaces on the repo dashboard.
+#
+# Why centralized:
+#   The plan/apply pipeline already lives in terraform-project-ci.yml.
+#   Drift detection ran inline in each project repo, drifting itself.
+#   Pulling it here means one config update propagates to every project.
+
+name: terraform-drift
+
+on:
+  workflow_call:
+    inputs:
+      services:
+        description: 'JSON array of service folder names (e.g. ''["vpc","s3","rds"]'')'
+        type: string
+        required: true
+      environment:
+        description: "Target environment (sandbox, dev, stg, prod)"
+        type: string
+        required: true
+      aws-region:
+        description: "AWS region"
+        type: string
+        default: "ap-south-1"
+      aws-role-arn:
+        description: "GitHubActionsTerraform IAM role ARN to assume via OIDC"
+        type: string
+        required: true
+      terraform-version:
+        description: "Terraform version pin (must match the apply path)"
+        type: string
+        default: "1.9.5"
+      open-issue-on-drift:
+        description: "Open a GitHub issue when drift is detected (exit code 2)"
+        type: boolean
+        default: true
+      fail-on-drift:
+        description: "Fail the workflow run when drift is detected (visible on dashboards)"
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write   # OIDC into target AWS account
+  contents: read
+  issues: write     # open drift issue
+
+jobs:
+  drift:
+    name: drift / ${{ matrix.service }} / ${{ inputs.environment }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: drift-${{ matrix.service }}-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: terraform init
+        working-directory: ${{ matrix.service }}
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: terraform init -backend-config="backend/config.${ENVIRONMENT}.hcl" -reconfigure
+
+      - name: terraform plan (drift check)
+        id: drift
+        working-directory: ${{ matrix.service }}
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        continue-on-error: true
+        run: |
+          set +e
+          terraform plan \
+            -var-file="tfvars/${ENVIRONMENT}.tfvars" \
+            -detailed-exitcode \
+            -no-color 2>&1 | tee drift.txt
+          ec=${PIPESTATUS[0]}
+          echo "exit_code=${ec}" >> "$GITHUB_OUTPUT"
+          # 0 = no diff, 1 = error, 2 = drift detected
+          exit 0
+
+      - name: Open issue on drift
+        if: ${{ inputs.open-issue-on-drift && steps.drift.outputs.exit_code == '2' }}
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          SERVICE: ${{ matrix.service }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        with:
+          script: |
+            const fs = require('fs');
+            const drift = fs.readFileSync(`${process.env.SERVICE}/drift.txt`, 'utf8');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Drift] ${new Date().toISOString().slice(0,10)} — ${process.env.SERVICE} (${process.env.ENVIRONMENT})`,
+              body: `## Drift detected\n\nService: \`${process.env.SERVICE}\`\nEnvironment: \`${process.env.ENVIRONMENT}\`\n\n\`\`\`\n${drift.slice(-10000)}\n\`\`\``,
+              labels: ['drift', 'infrastructure'],
+            });
+
+      - name: Mark workflow failed on drift
+        if: ${{ inputs.fail-on-drift && steps.drift.outputs.exit_code == '2' }}
+        env:
+          SERVICE: ${{ matrix.service }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          echo "::error::Drift detected in ${SERVICE} / ${ENVIRONMENT} — see issue and drift.txt"
+          exit 1
+
+      - name: Surface real plan errors
+        if: ${{ steps.drift.outputs.exit_code == '1' }}
+        run: |
+          echo "::error::terraform plan failed (exit 1) — not drift, real error. See log above."
+          exit 1

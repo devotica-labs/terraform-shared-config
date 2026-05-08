@@ -71,6 +71,14 @@ on:
         description: "Bot pushes regenerated README back to the PR branch instead of failing on diff"
         type: boolean
         default: false
+      examples-build-targets:
+        description: 'JSON array of subdirectory names under examples/ to validate (e.g. ''["basic","complete","with-ipv6"]''). Modules with non-standard layouts override this.'
+        type: string
+        default: '["basic","complete"]'
+      terraform-test-files:
+        description: 'JSON array of .tftest.hcl files (relative to working-directory) to run as the unit + contract gate. Integration tests should NOT be listed here — they belong in a workflow_dispatch flow.'
+        type: string
+        default: '["tests/unit.tftest.hcl","tests/contract.tftest.hcl"]'
     secrets:
       INFRACOST_API_KEY:
         description: "Infracost API key (free tier ok). When unset, the infracost job skips silently."
@@ -221,12 +229,20 @@ jobs:
       - name: terraform init
         run: terraform init -backend=false
         working-directory: ${{ inputs.working-directory }}
-      - name: terraform test (unit)
-        run: terraform test -filter=tests/unit.tftest.hcl
+      - name: terraform test
         working-directory: ${{ inputs.working-directory }}
-      - name: terraform test (contract)
-        run: terraform test -filter=tests/contract.tftest.hcl
-        working-directory: ${{ inputs.working-directory }}
+        env:
+          TEST_FILES: ${{ inputs.terraform-test-files }}
+        run: |
+          set -euo pipefail
+          # Loop over the JSON array, run each file as its own gate so the
+          # log groups stay readable. jq is preinstalled on ubuntu-22.04.
+          echo "${TEST_FILES}" | jq -r '.[]' | while read -r f; do
+            if [ -z "${f}" ]; then continue; fi
+            echo "::group::terraform test -filter=${f}"
+            terraform test -filter="${f}"
+            echo "::endgroup::"
+          done
 
   terraform-docs:
     name: terraform-docs verify
@@ -271,7 +287,7 @@ jobs:
     needs: validate
     strategy:
       matrix:
-        example: [basic, complete]
+        example: ${{ fromJSON(inputs.examples-build-targets) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11

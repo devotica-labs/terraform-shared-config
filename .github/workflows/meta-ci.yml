@@ -1,0 +1,114 @@
+# Self-linting CI for terraform-shared-config.
+#
+# Every other repo in the org calls this repo's reusable workflows. A
+# typo in a workflow file here breaks them all. This job runs on every
+# PR + push to main and validates the workflow files, the YAML in the
+# tool configs, and the JSON schema of the release-please configs
+# before any consumer feels the breakage.
+
+name: meta-ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint (workflow YAML)
+    runs-on: ubuntu-22.04
+    env:
+      ACTIONLINT_VERSION: 1.7.7
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin actionlint
+          actionlint --version
+      - name: Run actionlint
+        run: actionlint -color
+
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Install yamllint
+        run: pip install --no-cache-dir yamllint==1.35.1
+      - name: Run yamllint on workflow files (strict)
+        run: |
+          # comments rule relaxed: single-space before '# vX.Y.Z' SHA-pin
+          # comments is the repo's established style; we don't want CI to
+          # whine about that on every PR. line-length and document-start
+          # are off because they're noise on GitHub Actions YAML.
+          yamllint \
+            -d "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}, comments: {min-spaces-from-content: 1}, comments-indentation: disable}}" \
+            .github/workflows/
+
+  release-please-schema:
+    name: release-please config schema
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "20"
+      - name: Validate release-please-config.json
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/release-please-config.json ]; then
+            echo "::notice::No release-please-config.json — skipping schema check."
+            exit 0
+          fi
+          curl -sSL https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json \
+            -o /tmp/rp-config-schema.json
+          npx --yes ajv-cli@5.0.0 validate \
+            -s /tmp/rp-config-schema.json \
+            -d .github/release-please-config.json \
+            --strict=false
+
+      - name: Validate release-please-manifest.json
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/release-please-manifest.json ]; then
+            echo "::notice::No release-please-manifest.json — skipping schema check."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, re, sys
+          with open(".github/release-please-manifest.json") as f:
+              m = json.load(f)
+          if not isinstance(m, dict):
+              print("::error::manifest must be a JSON object", file=sys.stderr); sys.exit(1)
+          semver = re.compile(r"^\d+\.\d+\.\d+(?:[-+][\w.]+)?$")
+          for path, ver in m.items():
+              if not isinstance(ver, str) or not semver.match(ver):
+                  print(f"::error::manifest entry {path!r} is not semver: {ver!r}", file=sys.stderr); sys.exit(1)
+          print(f"::notice::manifest valid: {m}")
+          PY
+
+  json-syntax:
+    name: JSON syntax check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - name: Validate every .json file parses
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            if ! python3 -c "import json; json.load(open('${f}'))" 2>/dev/null; then
+              echo "::error file=${f}::not valid JSON"
+              fail=1
+            fi
+          done < <(git ls-files '*.json')
+          if [ "${fail}" -ne 0 ]; then exit 1; fi

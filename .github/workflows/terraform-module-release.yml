@@ -1,0 +1,131 @@
+# Reusable release workflow for Devotica Terraform module repos.
+#
+# Consumed by: every github.com/devotica-labs/terraform-aws-* repo via a
+# thin wrapper triggered on push to main. Replaces the duplicated
+# release.yml that lived inline in each module repo.
+#
+# Pipeline:
+#   1. release-please opens (or merges) a release PR with version bump
+#      + CHANGELOG.
+#   2. On release PR merge, release-please creates the GitHub Release
+#      and pushes the vX.Y.Z tag.
+#   3. cosign keyless-signs the tag (Sigstore Fulcio + Rekor).
+#   4. CycloneDX produces an SBOM for the module.
+#   5. Both artifacts attached to the GitHub Release for downstream
+#      auditors and the Terraform Registry.
+#   6. Floating v<MAJOR> tag is force-moved to the new release so
+#      consumers pinned at @v1 pick it up automatically.
+
+name: terraform-module-release
+
+on:
+  workflow_call:
+    inputs:
+      release-type:
+        description: "release-please release-type (terraform-module is the canonical choice)"
+        type: string
+        default: "terraform-module"
+      release-please-config-file:
+        description: "Path to release-please config JSON"
+        type: string
+        default: ".github/release-please-config.json"
+      release-please-manifest-file:
+        description: "Path to release-please manifest JSON"
+        type: string
+        default: ".github/release-please-manifest.json"
+      cosign-installer-version:
+        description: "sigstore/cosign-installer version tag (informational; we SHA-pin below)"
+        type: string
+        default: "v3"
+      retag-floating-major:
+        description: "Force-move v<MAJOR> tag to the new release after publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write       # create releases, tag, force-move floating tag
+  pull-requests: write  # release-please opens release PRs
+  id-token: write       # cosign keyless OIDC signing
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-22.04
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      major: ${{ steps.rp.outputs.major }}
+    steps:
+      - uses: googleapis/release-please-action@a02a34c4d625f9be7cb89156071d8567266a2445 # v4.1.3
+        id: rp
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: ${{ inputs.release-please-config-file }}
+          manifest-file: ${{ inputs.release-please-manifest-file }}
+
+  publish:
+    name: Sign + SBOM + GitHub Release
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # ---------- cosign keyless sign ----------
+      - uses: sigstore/cosign-installer@d7d6e113b16d7d595da6863d7e3c5cda1e3a8c83 # v3.5.0
+
+      - name: Sign git tag (keyless)
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --yes \
+            --bundle="${TAG_NAME}.bundle" \
+            <(echo "${TAG_NAME}")
+
+      # ---------- CycloneDX SBOM ----------
+      - uses: CycloneDX/gh-terraform-provider-action@e25f96e4e9e7fbe6a4d57c78c7f1ba6c4a8c8ed5 # v1.0.0
+        with:
+          project-directory: .
+          output-file: "${{ needs.release-please.outputs.tag_name }}.cdx.json"
+
+      # ---------- Attach to GitHub Release ----------
+      - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.0.5
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: |
+            ${{ needs.release-please.outputs.tag_name }}.bundle
+            ${{ needs.release-please.outputs.tag_name }}.cdx.json
+
+  retag-floating-major:
+    name: Repoint floating v${{ needs.release-please.outputs.major }} tag
+    needs: [release-please, publish]
+    if: ${{ inputs.retag-floating-major && needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+      MAJOR: ${{ needs.release-please.outputs.major }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          fetch-depth: 0
+      - name: Force-move v<MAJOR> tag to new release
+        run: |
+          set -euo pipefail
+          git config user.name  "devotica-bot"
+          git config user.email "bot@devotica.com"
+
+          echo "Re-pointing v${MAJOR} -> ${TAG_NAME}"
+          git tag -fa "v${MAJOR}" \
+            -m "Floating v${MAJOR} tag — auto-tracks latest v${MAJOR}.x.y. Currently points at ${TAG_NAME}." \
+            "${TAG_NAME}"
+          git push origin "v${MAJOR}" --force
