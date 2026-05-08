@@ -16,12 +16,12 @@ This repo ships **six** workflow files. They split into two groups by what trigg
 
 | Workflow | `on:` trigger | Runs in **this** repo? | Runs in **consumer** repos? |
 |---|---|:---:|:---:|
-| [`meta-ci.yml`](#meta-ciyml) | `pull_request` + `push` to `main` | ✅ every PR / push | — |
-| [`release.yml`](#releaseyml) | `push` to `main` | ✅ on `main` push (release-please) | — |
-| [`terraform-module-ci.yml`](#terraform-module-ciyml) | `workflow_call` only | — | ✅ via wrapper |
-| [`terraform-project-ci.yml`](#terraform-project-ciyml) | `workflow_call` only | — | ✅ via wrapper |
-| [`terraform-module-release.yml`](#terraform-module-releaseyml) | `workflow_call` only | — | ✅ via wrapper |
-| [`terraform-drift.yml`](#terraform-driftyml) | `workflow_call` only | — | ✅ via wrapper (cron) |
+| [`meta-ci.yml`](#meta-ciyml) | `pull_request` + `push` to `main` | ✅ every PR / push | ❌ |
+| [`release.yml`](#releaseyml) | `push` to `main` | ✅ release-please on `main` | ❌ |
+| [`terraform-module-ci.yml`](#terraform-module-ciyml) | `workflow_call` only | ❌ | ✅ via wrapper |
+| [`terraform-project-ci.yml`](#terraform-project-ciyml) | `workflow_call` only | ❌ | ✅ via wrapper |
+| [`terraform-module-release.yml`](#terraform-module-releaseyml) | `workflow_call` only | ❌ | ✅ via wrapper |
+| [`terraform-drift.yml`](#terraform-driftyml) | `workflow_call` only | ❌ | ✅ via wrapper (cron) |
 
 Reusable workflows do **not** fire when this repo is pushed. They only fire when a consumer repo invokes them via `uses: devotica-labs/terraform-shared-config/.github/workflows/<file>@v1`.
 
@@ -41,7 +41,8 @@ flowchart LR
         PCI["terraform-project-ci.yml<br/>project CI"]
         MRL["terraform-module-release.yml<br/>module release"]
         DRF["terraform-drift.yml<br/>drift detection"]
-        SELF["meta-ci.yml + release.yml<br/>(self-protection)"]
+        META["meta-ci.yml<br/>self-linting (PR gate)"]
+        SELFREL["release.yml<br/>self-versioning (release-please)"]
         CFG["pre-commit · tflint · terraform-docs<br/>checkov · editorconfig"]
     end
 
@@ -72,11 +73,25 @@ flowchart LR
     classDef consumer fill:#eaf1f8,color:#1a1a1a,stroke:#2E75B6;
     classDef pol fill:#dcfce7,color:#1a1a1a,stroke:#15803d;
     classDef ext fill:#fef3c7,color:#1a1a1a,stroke:#854d0e;
-    class MCI,PCI,MRL,DRF,SELF,CFG shared;
+    class MCI,PCI,MRL,DRF,META,SELFREL,CFG shared;
     class MOD,PROJ consumer;
     class OPA pol;
     class REG,SBX ext;
 ```
+
+---
+
+## Quickstart — adopting in a new repo
+
+Five steps to wire up a fresh `devotica-labs/terraform-aws-<name>` module repo (or `<client>-infra` project repo):
+
+1. **CI workflow.** Copy [`examples/module-ci.example.yml`](./examples/module-ci.example.yml) into the new repo as `.github/workflows/ci.yml` (or [`examples/project-ci.example.yml`](./examples/project-ci.example.yml) → split into `terraform-plan.yml` + `terraform-apply.yml` for project repos — see file header for the split logic).
+2. **Release workflow** (module repos only). Add a 10-line wrapper at `.github/workflows/release.yml` that calls `terraform-module-release.yml@v1` — see [§terraform-module-release.yml](#terraform-module-releaseyml).
+3. **Drift workflow** (project repos only). Add a wrapper at `.github/workflows/drift.yml` that calls `terraform-drift.yml@v1` on a daily `schedule: cron` — see [§terraform-drift.yml](#terraform-driftyml).
+4. **Tool configs.** Copy the four canonical configs (`tflint/.tflint.hcl`, `pre-commit/.pre-commit-config.yaml`, `terraform-docs/.terraform-docs.yml`, `checkov/.checkov.yaml`) plus `.editorconfig` into the repo root.
+5. **Optional secrets.** Add `INFRACOST_API_KEY` as an org-level secret if you want PR cost-diff comments. The job skips silently when the secret is unset, so this isn't blocking.
+
+Pin to `@v1` (recommended — auto-tracks the latest minor) or `@v1.x.y` (exact pin, used only when chasing a regression). See [Versioning policy](#versioning-policy).
 
 ---
 
@@ -92,7 +107,8 @@ This repo's reusable workflows are consumed by every other repo in the org — a
 |---|---|
 | `actionlint` | `actionlint` v1.7.7 over every workflow YAML — unknown contexts, malformed `if:`, bad `uses:` SHAs |
 | `yamllint` | `yamllint` v1.35.1 strict mode (line-length and document-start relaxed for GHA conventions) |
-| `release-please-schema` | JSON-schema validates `.github/release-please-config.json` and `…manifest.json` against upstream schemas |
+| `release-please-schema` | JSON-schema validates `.github/release-please-config.json` against the upstream release-please schema; verifies `…manifest.json` is a `{path: semver}` map |
+| `json-syntax` | Every `.json` file under version control parses cleanly — catches stray trailing commas in any committed config |
 
 If any job fails, the PR is blocked. Branch protection on `main` should require `meta-ci` as a status check.
 
@@ -125,15 +141,17 @@ The full module-CI gauntlet — fmt, validate, lint, sec, policy, test, docs, ex
 |---|---|---|---|
 | `terraform-version` | string | `1.9.5` | Pin for `hashicorp/setup-terraform` |
 | `working-directory` | string | `.` | Module root (use when the repo nests modules) |
-| `run-terraform-test` | bool | `true` | `terraform test -filter=tests/unit.tftest.hcl` and `…/contract.tftest.hcl` |
+| `run-terraform-test` | bool | `true` | Runs `terraform test -filter=…` for every file listed in `terraform-test-files` (default unit + contract) |
+| `terraform-test-files` | string (JSON array) | `'["tests/unit.tftest.hcl","tests/contract.tftest.hcl"]'` | Override when test files are named differently or split into more layers |
 | `run-tflint` | bool | `true` | tflint with AWS plugin, recursive |
-| `run-tfsec` | bool | `true` | tfsec HIGH/CRITICAL (job name preserved; v1.1+ implementation backed by trivy) |
+| `run-tfsec` | bool | `true` | `aquasecurity/tfsec-action` — fails on HIGH/CRITICAL findings |
 | `run-checkov` | bool | `true` | Checkov terraform framework |
 | `run-conftest` | bool | `true` | Pulls `terraform-policies@<conftest-policy-ref>` and runs conftest against `terraform plan -json` |
 | `run-terraform-docs-check` | bool | `true` | terraform-docs README sync (mode controlled by `terraform-docs-auto-update`) |
 | `terraform-docs-auto-update` | bool | `false` | `true` → bot inject + git-push README; `false` → CI fails on diff |
-| `run-infracost` | bool | `true` | PR cost-diff comment |
-| `run-examples-build` | bool | `true` | `terraform validate` in `examples/basic` + `examples/complete` |
+| `run-infracost` | bool | `true` | PR cost-diff comment (Tier-2 informational; skips silently when `INFRACOST_API_KEY` unset) |
+| `run-examples-build` | bool | `true` | `terraform validate` in every `examples/<name>/` folder listed in `examples-build-targets` (default `basic` + `complete`) |
+| `examples-build-targets` | string (JSON array) | `'["basic","complete"]'` | Override when a module ships extra example folders (e.g. `with-ipv6`, `multi-region`) |
 | `checkov-blocking` | bool | `false` | Flip Checkov to blocking once skip list is reviewed |
 | `conftest-policy-ref` | string | `v1` | Git ref of `terraform-policies` to use |
 | `gitleaks-version` | string | `8.18.4` | OSS gitleaks binary version (no paid license) |
@@ -151,7 +169,7 @@ flowchart LR
     PR["PR opened"] --> FMT["fmt"]
     FMT --> VAL["validate"]
     VAL --> P2A["tflint"]
-    VAL --> P2B["tfsec (trivy)"]
+    VAL --> P2B["tfsec<br/>HIGH/CRIT"]
     VAL --> P2C["gitleaks (binary)"]
     VAL --> P2D["terraform-docs"]
     VAL --> P3A["conftest (central pack)"]
@@ -202,6 +220,8 @@ jobs:
     secrets: inherit
 ```
 
+> 💡 A copy-pasteable version with every override commented out is at [`examples/module-ci.example.yml`](./examples/module-ci.example.yml).
+
 ---
 
 ### `terraform-project-ci.yml`
@@ -239,7 +259,7 @@ flowchart LR
     FMT --> GL["gitleaks (binary)"]
     GL --> MX{per-service matrix}
     MX --> TFL["tflint"]
-    MX --> TFS["tfsec (trivy)"]
+    MX --> TFS["tfsec<br/>HIGH/CRIT"]
     MX --> CKV["checkov<br/>(informational)"]
     MX --> OIDC["AWS OIDC"]
     OIDC --> INIT["terraform init"]
@@ -298,6 +318,8 @@ jobs:
   # apply_prod (gated by GitHub Environment "production") — see comment in
   # the file for the enable-procedure.
 ```
+
+> 💡 Copy-pasteable plan + apply pair (with the `apply_prod` block ready to uncomment) at [`examples/project-ci.example.yml`](./examples/project-ci.example.yml).
 
 ---
 
@@ -434,7 +456,7 @@ Workflow files are only half the story. The other half is the canonical tool con
 | [`checkov/.checkov.yaml`](./checkov/.checkov.yaml) | `.checkov.yaml` | Checkov skip list (informational mode by default) |
 | [`.editorconfig`](./.editorconfig) | `.editorconfig` | Whitespace / line-ending baseline |
 
-> Symlink rather than copy where you can — that way one PR here updates every consumer. CI catches drift via the `fmt` and `terraform-docs` jobs.
+> Treat this repo as the source of truth. When you need to tighten a rule, update the file here first, then bump consumers' `@v1` reference (or rely on the floating `v1` tag picking up automatically). Drift between consumer-side copies and this canonical version is caught at PR time by the `fmt`, `tflint`, and `terraform-docs` jobs.
 
 ---
 
@@ -464,8 +486,10 @@ Conventional Commits drive this. `feat:` → minor, `fix:` → patch, `feat!:` (
 
 | Tag | Date | Highlights |
 |---|---|---|
-| **`v1.1.0`** *(in progress on `feat/portable-ci-tools`)* | TBD | Portability fixes: tfsec → trivy (IP-allowlist friendly) · gitleaks → upstream binary (no paid org license) · conftest → upstream binary · terraform-docs gains opt-in auto-update mode. New inputs: `terraform-docs-auto-update`, `gitleaks-version`, `conftest-version`, `trivy-severity`. Backwards-compatible with v1 consumers — no input contract changes |
-| `v1.0.0` | 2026-04 | Initial scaffold — `terraform-module-ci.yml` + `terraform-project-ci.yml`, canonical tflint/checkov/pre-commit configs |
+| **`v1.1.0`** *(merged, awaiting release-please tag)* | 2026-05-08 | New reusable workflows: [`terraform-drift.yml`](./.github/workflows/terraform-drift.yml) and [`terraform-module-release.yml`](./.github/workflows/terraform-module-release.yml) (cosign + CycloneDX SBOM + auto-retag). Self-CI [`meta-ci.yml`](./.github/workflows/meta-ci.yml). New inputs `examples-build-targets` and `terraform-test-files` make the module-CI matrices configurable. Plus PR template and governance metadata. Backwards-compatible — every change adds optional surface |
+| `v1.0.2` | 2026-05-08 | Unblock org consumers — gitleaks switched to OSS binary (no paid license) · `infracost` truly informational (skips silently when `INFRACOST_API_KEY` unset) · new `terraform-docs-auto-update` mode pushes regenerated README to PR branch |
+| `v1.0.1` | 2026-05-07 | Corrected broken SHA pins for checkov, gitleaks, infracost actions |
+| `v1.0.0` | 2026-05-04 | Initial scaffold — `terraform-module-ci.yml` + `terraform-project-ci.yml`, canonical `tflint`/`checkov`/`pre-commit`/`terraform-docs` configs |
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full release-please-generated history.
 
@@ -474,6 +498,21 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full release-please-generated history
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). External pull requests are not accepted at this time; please file issues for bug reports and feature requests.
+
+---
+
+## Governance
+
+| File | Purpose |
+|---|---|
+| [`LICENSE`](./LICENSE) | Apache-2.0 |
+| [`SECURITY.md`](./SECURITY.md) | Vulnerability reporting (`security@devotica.com`) + supported-versions policy |
+| [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 — `conduct@devotica.com` for reports |
+| [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Workflow rules, Conventional Commit conventions, release process |
+| [`CHANGELOG.md`](./CHANGELOG.md) | release-please-managed history (don't edit by hand) |
+| [`.github/CODEOWNERS`](./.github/CODEOWNERS) | Default reviews → `@cloud-leads`; workflows → `@cloud-leads + @security` |
+| [`.github/dependabot.yml`](./.github/dependabot.yml) | Weekly GitHub Actions SHA refresh, Mon 09:00 IST |
+| [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md) | What & why · behaviour change · tested how · checklist |
 
 ---
 
