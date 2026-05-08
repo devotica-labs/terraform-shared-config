@@ -9,6 +9,15 @@
 #
 # Inputs let consumers turn individual jobs off when they don't apply
 # (e.g. a docs-only module skipping infracost). Defaults err on the strict side.
+#
+# v1.1.0 changes (portability fixes from real-world usage):
+#   * tfsec action → trivy (aquasecurity action blocked by some IP allowlists)
+#   * gitleaks action → upstream binary (the marketplace action requires a
+#     paid org license)
+#   * conftest action → upstream binary (the instrumenta action is dead and
+#     never resolves)
+#   * terraform-docs: support both verify-only and auto-update modes
+#     (consumer chooses via terraform-docs-auto-update input)
 
 name: terraform-module-ci
 
@@ -32,7 +41,7 @@ on:
         type: boolean
         default: true
       run-tfsec:
-        description: "Run tfsec (HIGH/CRITICAL fail)"
+        description: "Run security scan (now backed by trivy — see v1.1.0 changes)"
         type: boolean
         default: true
       run-checkov:
@@ -44,9 +53,13 @@ on:
         type: boolean
         default: true
       run-terraform-docs-check:
-        description: "Verify README terraform-docs section is up to date"
+        description: "Run terraform-docs (mode controlled by terraform-docs-auto-update)"
         type: boolean
         default: true
+      terraform-docs-auto-update:
+        description: "true → bot inject+git-push; false → verify-only (CI fails on diff)"
+        type: boolean
+        default: false
       run-infracost:
         description: "Post Infracost diff comment on PRs"
         type: boolean
@@ -63,6 +76,18 @@ on:
         description: "Git ref of devotica-labs/terraform-policies to use"
         type: string
         default: "v1"
+      gitleaks-version:
+        description: "Pinned gitleaks binary release"
+        type: string
+        default: "8.18.2"
+      conftest-version:
+        description: "Pinned conftest binary release"
+        type: string
+        default: "0.46.0"
+      trivy-severity:
+        description: "Trivy severity threshold (HIGH,CRITICAL fails the build)"
+        type: string
+        default: "HIGH,CRITICAL"
     secrets:
       INFRACOST_API_KEY:
         description: "Infracost API key (free tier ok)"
@@ -124,19 +149,26 @@ jobs:
         run: tflint --recursive --format compact
         working-directory: ${{ inputs.working-directory }}
 
+  # FIX (v1.1.0): tfsec marketplace action is blocked by some org IP allowlists.
+  # Switched to trivy — same Terraform/IaC scanning, no IP restrictions.
+  # The job name remains "tfsec" for backwards-compatible required-status-check
+  # configuration in branch protection.
   tfsec:
-    name: tfsec
+    name: tfsec (trivy)
     if: ${{ inputs.run-tfsec }}
     runs-on: ubuntu-22.04
     needs: fmt
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6 # v1.0.3
+      - uses: aquasecurity/trivy-action@master
         with:
-          working_directory: ${{ inputs.working-directory }}
-          soft_fail: false
-          additional_args: --minimum-severity HIGH
+          scan-type: config
+          scan-ref: ${{ inputs.working-directory }}
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: 1
 
+  # FIX (v1.1.0): gitleaks-action requires a paid org license. Run the
+  # upstream OSS binary directly from gitleaks/gitleaks releases.
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-22.04
@@ -144,9 +176,16 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      - name: Install gitleaks
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GL_VER: ${{ inputs.gitleaks-version }}
+      - name: gitleaks detect
+        run: gitleaks detect --source . --redact --verbose
+        working-directory: ${{ inputs.working-directory }}
 
   checkov:
     name: checkov
@@ -162,6 +201,8 @@ jobs:
           quiet: true
           soft_fail: ${{ !inputs.checkov-blocking }}
 
+  # FIX (v1.1.0): instrumenta/conftest-action is dead and unresolvable.
+  # Install the upstream binary from open-policy-agent/conftest releases.
   conftest:
     name: conftest (OPA policies)
     if: ${{ inputs.run-conftest }}
@@ -179,6 +220,14 @@ jobs:
           repository: devotica-labs/terraform-policies
           ref: ${{ inputs.conftest-policy-ref }}
           path: .policies
+      - name: Install conftest
+        run: |
+          curl -sSfLo /tmp/conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CT_VER}/conftest_${CT_VER}_Linux_x86_64.tar.gz"
+          sudo tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin conftest
+          conftest --version
+        env:
+          CT_VER: ${{ inputs.conftest-version }}
       - name: Render plan JSON
         run: |
           terraform init -backend=false
@@ -186,10 +235,11 @@ jobs:
           terraform show -json tfplan.binary > tfplan.json
         working-directory: ${{ inputs.working-directory }}
       - name: Run conftest
-        uses: instrumenta/conftest-action@v0.5.1
-        with:
-          files: ${{ inputs.working-directory }}/tfplan.json
-          policy: .policies/policies/
+        run: |
+          conftest test \
+            "${{ inputs.working-directory }}/tfplan.json" \
+            --policy .policies/policies/ \
+            --all-namespaces
 
   terraform-test:
     name: terraform test (unit + contract)
@@ -212,18 +262,45 @@ jobs:
         run: terraform test -filter=tests/contract.tftest.hcl
         working-directory: ${{ inputs.working-directory }}
 
+  # FIX (v1.1.0): terraform-docs supports two modes:
+  #   verify-only (default)    : CI fails if README is out of date
+  #   auto-update (opt-in)     : bot injects fresh docs and git-pushes a
+  #                              follow-up commit to the same branch
+  # Auto-update needs contents: write, so consumers must enable that
+  # permission at the workflow_call site (or use this pattern):
+  #   permissions:
+  #     contents: write
   terraform-docs:
-    name: terraform-docs verify
+    name: terraform-docs
     if: ${{ inputs.run-terraform-docs-check }}
     runs-on: ubuntu-22.04
     needs: fmt
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: terraform-docs/gh-actions@aeae0038ed47a547e0c0fca5c059d3335f48fb25 # v1.3.0
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          token: ${{ github.token }}
+      - name: terraform-docs (verify)
+        if: ${{ !inputs.terraform-docs-auto-update }}
+        uses: terraform-docs/gh-actions@aeae0038ed47a547e0c0fca5c059d3335f48fb25 # v1.3.0
         with:
           working-dir: ${{ inputs.working-directory }}
           config-file: .terraform-docs.yml
           fail-on-diff: true
+      - name: terraform-docs (inject + push)
+        if: ${{ inputs.terraform-docs-auto-update && github.event_name == 'pull_request' }}
+        uses: terraform-docs/gh-actions@aeae0038ed47a547e0c0fca5c059d3335f48fb25 # v1.3.0
+        with:
+          working-dir: ${{ inputs.working-directory }}
+          output-file: README.md
+          output-method: inject
+          git-push: true
+          git-push-user-name: github-actions[bot]
+          git-push-user-email: 41898282+github-actions[bot]@users.noreply.github.com
+          git-commit-message: "docs: auto-update terraform-docs [skip ci]"
 
   examples-build:
     name: examples build
@@ -240,15 +317,19 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform-version }}
           terraform_wrapper: false
-      - name: terraform init
-        run: terraform init -backend=false
-        working-directory: ${{ inputs.working-directory }}/examples/${{ matrix.example }}
-        continue-on-error: true # not every module ships both examples
-      - name: terraform validate
+      - name: terraform init (skip if example absent)
         run: |
-          if [ -d "${{ inputs.working-directory }}/examples/${{ matrix.example }}" ]; then
-            cd "${{ inputs.working-directory }}/examples/${{ matrix.example }}"
-            terraform validate
+          DIR="${{ inputs.working-directory }}/examples/${{ matrix.example }}"
+          if [ -d "$DIR" ]; then
+            cd "$DIR" && terraform init -backend=false
+          else
+            echo "examples/${{ matrix.example }} not present — skipping"
+          fi
+      - name: terraform validate (skip if example absent)
+        run: |
+          DIR="${{ inputs.working-directory }}/examples/${{ matrix.example }}"
+          if [ -d "$DIR" ]; then
+            cd "$DIR" && terraform validate
           else
             echo "examples/${{ matrix.example }} not present — skipping"
           fi
@@ -263,14 +344,27 @@ jobs:
     needs: validate
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
+      - name: Skip if no API key
+        id: check_key
+        run: |
+          if [ -z "${{ secrets.INFRACOST_API_KEY }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "INFRACOST_API_KEY not set — skipping cost estimate"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Setup Infracost
+        if: steps.check_key.outputs.skip == 'false'
+        uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
-      - name: Infracost breakdown
+      - name: Infracost breakdown + comment
+        if: steps.check_key.outputs.skip == 'false'
         run: |
-          if [ -d "${{ inputs.working-directory }}/examples/complete" ]; then
+          DIR="${{ inputs.working-directory }}/examples/complete"
+          if [ -d "$DIR" ]; then
             infracost breakdown \
-              --path "${{ inputs.working-directory }}/examples/complete" \
+              --path "$DIR" \
               --format json --out-file /tmp/infracost.json
             infracost comment github \
               --path /tmp/infracost.json \

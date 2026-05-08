@@ -6,8 +6,13 @@
 #   * Operates on N service folders (vpc/, s3/, rds/, ...) per the Foundation
 #     Plan §4 service-first layout. Plan/apply gates are per-service.
 #   * Pulls credentials via OIDC into the target AWS account (no long-lived keys).
-#   * Drift detection job — runs on a schedule from the consumer side.
 #   * No release-please. Project repos do not version themselves; they just apply.
+#
+# v1.1.0 changes (portability fixes from real-world usage):
+#   * tfsec action → trivy
+#   * gitleaks action → upstream binary
+#   * conftest action → upstream binary
+#   * infracost — graceful skip when INFRACOST_API_KEY not configured
 
 name: terraform-project-ci
 
@@ -23,7 +28,7 @@ on:
         type: string
         required: true
       environment:
-        description: "Target environment for plan/apply (dev, stg, prod)"
+        description: "Target environment for plan/apply (dev, stg, prod, sandbox)"
         type: string
         required: true
       aws-region:
@@ -60,6 +65,15 @@ on:
       conftest-policy-ref:
         type: string
         default: "v1"
+      gitleaks-version:
+        type: string
+        default: "8.18.2"
+      conftest-version:
+        type: string
+        default: "0.46.0"
+      trivy-severity:
+        type: string
+        default: "HIGH,CRITICAL"
     secrets:
       INFRACOST_API_KEY:
         required: false
@@ -81,6 +95,7 @@ jobs:
           terraform_wrapper: false
       - run: terraform fmt -check -recursive -diff
 
+  # FIX (v1.1.0): gitleaks-action requires a paid org license. Use binary.
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-22.04
@@ -88,9 +103,15 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      - name: Install gitleaks
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GL_VER: ${{ inputs.gitleaks-version }}
+      - name: gitleaks detect
+        run: gitleaks detect --source . --redact --verbose
 
   # ----- per-service matrix: lint / sec / policy / plan / apply -----
 
@@ -124,12 +145,15 @@ jobs:
           tflint --init
           tflint --format compact
 
-      - name: tfsec
+      # FIX (v1.1.0): trivy replaces tfsec marketplace action.
+      - name: tfsec (trivy)
         if: ${{ inputs.run-tfsec }}
-        uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6
+        uses: aquasecurity/trivy-action@master
         with:
-          working_directory: ${{ matrix.service }}
-          additional_args: --minimum-severity HIGH
+          scan-type: config
+          scan-ref: ${{ matrix.service }}
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: 1
 
       - name: Checkov
         if: ${{ inputs.run-checkov }}
@@ -159,37 +183,78 @@ jobs:
           ref: ${{ inputs.conftest-policy-ref }}
           path: .policies
 
+      # FIX (v1.1.0): conftest binary, not the dead instrumenta action.
+      - name: Install conftest
+        if: ${{ inputs.run-conftest && inputs.run-plan }}
+        run: |
+          curl -sSfLo /tmp/conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CT_VER}/conftest_${CT_VER}_Linux_x86_64.tar.gz"
+          sudo tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin conftest
+          conftest --version
+        env:
+          CT_VER: ${{ inputs.conftest-version }}
+
       - name: terraform plan
         if: ${{ inputs.run-plan }}
         working-directory: ${{ matrix.service }}
         run: |
-          terraform plan -var-file=tfvars/${{ inputs.environment }}.tfvars -out=tfplan.binary
+          terraform plan -var-file=tfvars/${{ inputs.environment }}.tfvars -out=tfplan.binary -no-color 2>&1 | tee plan.txt
           terraform show -json tfplan.binary > tfplan.json
 
       - name: conftest (OPA policies)
         if: ${{ inputs.run-conftest && inputs.run-plan }}
-        uses: instrumenta/conftest-action@v0.5.1
-        with:
-          files: ${{ matrix.service }}/tfplan.json
-          policy: .policies/policies/
+        run: |
+          conftest test \
+            "${{ matrix.service }}/tfplan.json" \
+            --policy .policies/policies/ \
+            --all-namespaces
 
-      - name: Infracost diff comment
-        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+      - name: Skip-if-no-key check (infracost)
+        id: check_key
+        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' && inputs.run-plan }}
+        run: |
+          if [ -z "${{ secrets.INFRACOST_API_KEY }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "INFRACOST_API_KEY not set — skipping cost estimate"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Infracost
+        if: ${{ inputs.run-infracost && steps.check_key.outputs.skip == 'false' }}
         uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 
-      - name: Infracost run
-        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+      - name: Infracost diff + comment
+        if: ${{ inputs.run-infracost && steps.check_key.outputs.skip == 'false' }}
         working-directory: ${{ matrix.service }}
         run: |
-          infracost breakdown --path . --format json --out-file /tmp/infracost-${{ matrix.service }}.json
+          infracost breakdown --path . --format json --out-file /tmp/infracost-${{ matrix.service }}.json || true
           infracost comment github \
             --path /tmp/infracost-${{ matrix.service }}.json \
             --repo "${{ github.repository }}" \
             --pull-request "${{ github.event.pull_request.number }}" \
             --github-token "${{ github.token }}" \
-            --behavior update
+            --behavior update || true
+
+      - name: Post plan summary to PR
+        if: ${{ inputs.run-plan && github.event_name == 'pull_request' && always() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planFile = '${{ matrix.service }}/plan.txt';
+            const plan = fs.existsSync(planFile)
+              ? fs.readFileSync(planFile, 'utf8')
+              : 'Plan did not run — check the terraform init or plan step.';
+            const truncated = plan.length > 60000 ? plan.slice(-60000) : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Plan — \`${{ matrix.service }}\` (${{ inputs.environment }})\n\`\`\`\n${truncated}\n\`\`\``
+            });
 
       - name: terraform apply
         if: ${{ inputs.run-apply }}

@@ -6,6 +6,13 @@ Canonical reusable GitHub Actions workflows and Terraform tooling configs for th
 
 > **Why this repo exists.** One source of truth for the entire CI pipeline definition and tool configs. Bumping a tool version, tightening a gate, or adding a new check is a single PR here that propagates to every consumer on their next `@vX.Y.Z` bump.
 
+## Version
+
+| Tag | Notes |
+|---|---|
+| `v1.1.0` | Portability fixes from real-world usage: tfsec → trivy (IP-allowlist friendly), gitleaks → upstream binary (no paid org license), conftest → upstream binary (instrumenta action is dead), terraform-docs gains opt-in auto-update mode. New inputs: `terraform-docs-auto-update`, `gitleaks-version`, `conftest-version`, `trivy-severity`. Backwards compatible: existing `@v1` consumers see no input changes. |
+| `v1.0.0` | Initial scaffold — module-ci + project-ci reusable workflows, canonical tflint/checkov/pre-commit configs. |
+
 ## How it fits together
 
 ```mermaid
