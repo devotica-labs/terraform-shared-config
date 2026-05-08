@@ -46,7 +46,12 @@ jobs:
         run: pip install --no-cache-dir yamllint==1.35.1
       - name: Run yamllint on workflow files (strict)
         run: |
-          yamllint -d "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}}}" \
+          # comments rule relaxed: single-space before '# vX.Y.Z' SHA-pin
+          # comments is the repo's established style; we don't want CI to
+          # whine about that on every PR. line-length and document-start
+          # are off because they're noise on GitHub Actions YAML.
+          yamllint \
+            -d "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}, comments: {min-spaces-from-content: 1}, comments-indentation: disable}}" \
             .github/workflows/
 
   release-please-schema:
