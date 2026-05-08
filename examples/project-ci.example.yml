@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Project monorepo CI — paired plan + apply workflows for a project repo
+# (e.g. sample-infra, client-A-infra). Drop the two YAML blocks below into
+# .github/workflows/terraform-plan.yml and .github/workflows/terraform-apply.yml
+# respectively (split because GitHub Actions does not support two `on:`
+# triggers in one workflow file with different gating logic).
+#
+# What runs (set by the central reusable workflow):
+#   fmt -> gitleaks (OSS binary, repo-wide) -> per-service matrix
+#   { tflint -> tfsec -> checkov -> OIDC -> init -> plan -> conftest
+#     against terraform-policies@v1 -> infracost (Tier-2, informational) }.
+#
+# Apply path adds: terraform apply (gated by the GitHub Environment).
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# .github/workflows/terraform-plan.yml — runs on every PR
+# ===========================================================================
+# name: Terraform Plan
+#
+# on:
+#   pull_request:
+#     branches: [main]
+#
+# permissions:
+#   id-token: write       # OIDC into the target AWS account
+#   contents: read
+#   pull-requests: write  # plan summary comment
+#
+# jobs:
+#   plan:
+#     uses: devotica-labs/terraform-shared-config/.github/workflows/terraform-project-ci.yml@v1
+#     with:
+#       services: '["vpc","s3","rds"]'   # JSON array of service folder names
+#       environment: "sandbox"
+#       aws-region: "ap-south-1"
+#       aws-role-arn: ${{ vars.AWS_OIDC_ROLE_ARN }}
+#       run-plan: true
+#       run-apply: false
+#       terraform-version: "1.9.5"
+#     secrets: inherit
+
+
+# ===========================================================================
+# .github/workflows/terraform-apply.yml — runs on push to main
+# ===========================================================================
+# name: Terraform Apply
+#
+# on:
+#   push:
+#     branches: [main]
+#
+# permissions:
+#   id-token: write
+#   contents: read
+#
+# jobs:
+#   apply_sandbox:
+#     uses: devotica-labs/terraform-shared-config/.github/workflows/terraform-project-ci.yml@v1
+#     with:
+#       services: '["vpc","s3","rds"]'
+#       environment: "sandbox"
+#       aws-region: "ap-south-1"
+#       aws-role-arn: ${{ vars.AWS_OIDC_ROLE_ARN }}
+#       run-plan: false
+#       run-apply: true
+#       terraform-version: "1.9.5"
+#     secrets: inherit
+#
+#   apply_prod:
+#     # Enable AFTER configuring Settings -> Environments -> production
+#     # with required reviewers + branch restriction to main.
+#     needs: apply_sandbox
+#     uses: devotica-labs/terraform-shared-config/.github/workflows/terraform-project-ci.yml@v1
+#     with:
+#       services: '["vpc","s3","rds"]'
+#       environment: "prod"
+#       aws-region: "ap-south-1"
+#       aws-role-arn: ${{ vars.AWS_OIDC_ROLE_ARN_PROD }}
+#       run-plan: false
+#       run-apply: true
+#       terraform-version: "1.9.5"
+#     secrets: inherit
