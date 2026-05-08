@@ -63,9 +63,17 @@ on:
         description: "Git ref of devotica-labs/terraform-policies to use"
         type: string
         default: "v1"
+      gitleaks-version:
+        description: "OSS gitleaks binary version (no paid license needed)"
+        type: string
+        default: "8.18.4"
+      terraform-docs-auto-update:
+        description: "Bot pushes regenerated README back to the PR branch instead of failing on diff"
+        type: boolean
+        default: false
     secrets:
       INFRACOST_API_KEY:
-        description: "Infracost API key (free tier ok)"
+        description: "Infracost API key (free tier ok). When unset, the infracost job skips silently."
         required: false
 
 permissions:
@@ -144,9 +152,17 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      # OSS binary avoids the paid org-license requirement of gitleaks-action.
+      - name: Install gitleaks
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.gitleaks-version }}
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Run gitleaks
+        run: gitleaks detect --source . --no-banner --redact --exit-code 1
 
   checkov:
     name: checkov
@@ -217,13 +233,36 @@ jobs:
     if: ${{ inputs.run-terraform-docs-check }}
     runs-on: ubuntu-22.04
     needs: fmt
+    permissions:
+      # Needs write to push the regenerated README back when auto-update is on.
+      # Read is sufficient when auto-update is off (the default).
+      contents: write
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: terraform-docs/gh-actions@aeae0038ed47a547e0c0fca5c059d3335f48fb25 # v1.3.0
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      # Verify-only mode: fail if README drifted, do not push.
+      - name: terraform-docs verify (no auto-update)
+        if: ${{ !inputs.terraform-docs-auto-update }}
+        uses: terraform-docs/gh-actions@aeae0038ed47a547e0c0fca5c059d3335f48fb25 # v1.3.0
         with:
           working-dir: ${{ inputs.working-directory }}
           config-file: .terraform-docs.yml
           fail-on-diff: true
+
+      # Auto-update mode: regenerate, commit, push back to the PR branch.
+      - name: terraform-docs auto-update
+        if: ${{ inputs.terraform-docs-auto-update && github.event_name == 'pull_request' }}
+        uses: terraform-docs/gh-actions@aeae0038ed47a547e0c0fca5c059d3335f48fb25 # v1.3.0
+        with:
+          working-dir: ${{ inputs.working-directory }}
+          config-file: .terraform-docs.yml
+          output-file: README.md
+          output-method: inject
+          git-push: true
+          git-commit-message: "chore(docs): regenerate terraform-docs"
 
   examples-build:
     name: examples build
@@ -258,24 +297,45 @@ jobs:
   # -----------------------------------------------------------------
   infracost:
     name: infracost (PR comment)
+    # Tier-2 informational job: never blocks the build. continue-on-error
+    # ensures a missing API key, network blip, or infracost CLI hiccup
+    # does not turn a green PR red.
     if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+    continue-on-error: true
     runs-on: ubuntu-22.04
     needs: validate
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
+      - name: Skip when API key not provided
+        id: precheck
+        env:
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+        run: |
+          if [ -z "${INFRACOST_API_KEY:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "INFRACOST_API_KEY not set on this repo/org — skipping cost diff comment."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.precheck.outputs.skip != 'true'
+        uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
       - name: Infracost breakdown
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          WORKDIR: ${{ inputs.working-directory }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ -d "${{ inputs.working-directory }}/examples/complete" ]; then
+          if [ -d "${WORKDIR}/examples/complete" ]; then
             infracost breakdown \
-              --path "${{ inputs.working-directory }}/examples/complete" \
+              --path "${WORKDIR}/examples/complete" \
               --format json --out-file /tmp/infracost.json
             infracost comment github \
               --path /tmp/infracost.json \
-              --repo "${{ github.repository }}" \
-              --pull-request "${{ github.event.pull_request.number }}" \
+              --repo "${REPO}" \
+              --pull-request "${PR_NUMBER}" \
               --github-token "${{ github.token }}" \
               --behavior update
           else

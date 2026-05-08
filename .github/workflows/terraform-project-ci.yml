@@ -60,6 +60,10 @@ on:
       conftest-policy-ref:
         type: string
         default: "v1"
+      gitleaks-version:
+        description: "OSS gitleaks binary version (no paid license needed)"
+        type: string
+        default: "8.18.4"
     secrets:
       INFRACOST_API_KEY:
         required: false
@@ -88,9 +92,17 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      # OSS binary avoids the paid org-license requirement of gitleaks-action.
+      - name: Install gitleaks
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.gitleaks-version }}
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Run gitleaks
+        run: gitleaks detect --source . --no-banner --redact --exit-code 1
 
   # ----- per-service matrix: lint / sec / policy / plan / apply -----
 
@@ -173,21 +185,42 @@ jobs:
           files: ${{ matrix.service }}/tfplan.json
           policy: .policies/policies/
 
-      - name: Infracost diff comment
+      # Infracost is informational — never blocks. Skip cleanly when no API key.
+      - name: Infracost precheck
+        id: infracost_precheck
         if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+        env:
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+        run: |
+          if [ -z "${INFRACOST_API_KEY:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "INFRACOST_API_KEY not set — skipping cost diff for ${{ matrix.service }}"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        continue-on-error: true
+
+      - name: Infracost setup
+        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' && steps.infracost_precheck.outputs.skip != 'true' }}
         uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
+        continue-on-error: true
 
       - name: Infracost run
-        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' }}
+        if: ${{ inputs.run-infracost && github.event_name == 'pull_request' && steps.infracost_precheck.outputs.skip != 'true' }}
+        continue-on-error: true
         working-directory: ${{ matrix.service }}
+        env:
+          SERVICE: ${{ matrix.service }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          infracost breakdown --path . --format json --out-file /tmp/infracost-${{ matrix.service }}.json
+          infracost breakdown --path . --format json --out-file "/tmp/infracost-${SERVICE}.json"
           infracost comment github \
-            --path /tmp/infracost-${{ matrix.service }}.json \
-            --repo "${{ github.repository }}" \
-            --pull-request "${{ github.event.pull_request.number }}" \
+            --path "/tmp/infracost-${SERVICE}.json" \
+            --repo "${REPO}" \
+            --pull-request "${PR_NUMBER}" \
             --github-token "${{ github.token }}" \
             --behavior update
 
