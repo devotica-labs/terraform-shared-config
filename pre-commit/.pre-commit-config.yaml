@@ -25,7 +25,10 @@ repos:
           - "--hook-config=--create-file-if-not-exist=true"
 
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.18.0
+    # Keep this aligned with the gitleaks-version default in
+    # .github/workflows/terraform-module-ci.yml so local pre-commit and CI
+    # detect the same set of leaks.
+    rev: v8.18.4
     hooks:
       - id: gitleaks
 

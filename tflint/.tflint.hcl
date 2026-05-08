@@ -15,7 +15,7 @@ plugin "terraform" {
 
 plugin "aws" {
   enabled = true
-  version = "0.30.0"
+  version = "0.32.0"
   source  = "github.com/terraform-linters/tflint-ruleset-aws"
 }
 
@@ -33,10 +33,19 @@ rule "terraform_naming_convention" {
 rule "terraform_required_providers" { enabled = true }
 rule "terraform_required_version"   { enabled = true }
 
-# Catch deprecated arguments early
+# Mandatory tag set per Foundation Plan §15.2 — all six tags must be present
+# on every taggable AWS resource. tflint catches this at PR time so the OPA
+# conftest gate isn't the first place the gap surfaces.
 rule "aws_resource_missing_tags" {
   enabled = true
-  tags    = ["Environment", "Project", "Owner", "CostCenter", "ManagedBy"]
+  tags = [
+    "Environment",
+    "Project",
+    "Owner",
+    "CostCenter",
+    "ManagedBy",
+    "Repo",
+  ]
 }
 
 # Standard hygiene

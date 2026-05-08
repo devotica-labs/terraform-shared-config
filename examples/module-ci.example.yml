@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# Module repo CI — copy this file to .github/workflows/ci.yml in any
+# devotica-labs/terraform-aws-* module repo. Adjust inputs as needed.
+#
+# What runs (set by the central reusable workflow):
+#   fmt -> validate -> tflint -> tfsec -> gitleaks (OSS binary) ->
+#   terraform-docs verify (auto-update on PRs) -> conftest (OPA pack from
+#   terraform-policies@v1) -> terraform test (unit + contract) ->
+#   examples build (basic + complete) -> checkov -> infracost (Tier-2,
+#   informational only).
+# ---------------------------------------------------------------------------
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: write       # terraform-docs auto-update pushes regenerated README on PRs
+  pull-requests: write
+  id-token: write       # OIDC for any AWS-touching test layer
+
+jobs:
+  ci:
+    uses: devotica-labs/terraform-shared-config/.github/workflows/terraform-module-ci.yml@v1
+    with:
+      terraform-version: "1.9.5"
+      working-directory: "."
+      terraform-docs-auto-update: true
+      # Optional overrides — defaults are sane:
+      #   run-terraform-test: true
+      #   run-tflint: true
+      #   run-tfsec: true
+      #   run-checkov: true
+      #   run-conftest: true
+      #   run-terraform-docs-check: true
+      #   run-infracost: true
+      #   run-examples-build: true
+      #   checkov-blocking: false   # flip to true once the skip list is curated
+      #   conftest-policy-ref: v1   # devotica-labs/terraform-policies floating tag
+      #   gitleaks-version: 8.18.4
+    secrets: inherit
