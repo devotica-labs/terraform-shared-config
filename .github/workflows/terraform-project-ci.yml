@@ -240,4 +240,3 @@ jobs:
         if: ${{ inputs.run-apply }}
         working-directory: ${{ matrix.service }}
         run: terraform apply -auto-approve -var-file=tfvars/${{ inputs.environment }}.tfvars
-
