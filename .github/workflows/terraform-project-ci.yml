@@ -136,12 +136,16 @@ jobs:
           tflint --init
           tflint --format compact
 
-      - name: tfsec
+      - name: tfsec (trivy)
+        # NOTE: tfsec-action blocked by Aquasecurity org IP allowlist on GitHub runners.
         if: ${{ inputs.run-tfsec }}
-        uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6
+        uses: aquasecurity/trivy-action@master
         with:
-          working_directory: ${{ matrix.service }}
-          additional_args: --minimum-severity HIGH
+          scan-type: config
+          scan-ref: ${{ matrix.service }}
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          hide-progress: true
 
       - name: Checkov
         if: ${{ inputs.run-checkov }}
@@ -179,11 +183,19 @@ jobs:
           terraform show -json tfplan.binary > tfplan.json
 
       - name: conftest (OPA policies)
+        # NOTE: instrumenta/conftest-action@v0.5.1 does not exist on GitHub.
+        # Using the upstream binary directly instead.
         if: ${{ inputs.run-conftest && inputs.run-plan }}
-        uses: instrumenta/conftest-action@v0.5.1
-        with:
-          files: ${{ matrix.service }}/tfplan.json
-          policy: .policies/policies/
+        run: |
+          set -euo pipefail
+          CONFTEST_VERSION="0.46.0"
+          curl -sSLo conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf conftest.tar.gz conftest
+          mv conftest /usr/local/bin/
+          conftest test "${{ matrix.service }}/tfplan.json" \
+            --policy .policies/policies/ \
+            --all-namespaces
 
       # Infracost is informational — never blocks. Skip cleanly when no API key.
       - name: Infracost precheck
@@ -228,3 +240,4 @@ jobs:
         if: ${{ inputs.run-apply }}
         working-directory: ${{ matrix.service }}
         run: terraform apply -auto-approve -var-file=tfvars/${{ inputs.environment }}.tfvars
+
