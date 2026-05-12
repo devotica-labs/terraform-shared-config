@@ -79,6 +79,10 @@ on:
         description: 'JSON array of .tftest.hcl files (relative to working-directory) to run as the unit + contract gate. Integration tests should NOT be listed here — they belong in a workflow_dispatch flow.'
         type: string
         default: '["tests/unit.tftest.hcl","tests/contract.tftest.hcl"]'
+      conftest-plan-from:
+        description: 'Subpath under working-directory to render the conftest plan from. Default "examples/basic" because module roots have required variables and cannot be planned in isolation. Set to "." only for modules with no required vars.'
+        type: string
+        default: "examples/basic"
     secrets:
       INFRACOST_API_KEY:
         description: "Infracost API key (free tier ok). When unset, the infracost job skips silently."
@@ -207,12 +211,32 @@ jobs:
           repository: devotica-labs/terraform-policies
           ref: ${{ inputs.conftest-policy-ref }}
           path: .policies
-      - name: Render plan JSON
+      - name: Resolve conftest plan target
+        id: target
+        env:
+          ROOT_DIR: ${{ inputs.working-directory }}
+          SUB_DIR: ${{ inputs.conftest-plan-from }}
         run: |
+          set -euo pipefail
+          # Join working-directory + conftest-plan-from with sensible handling
+          if [ "$SUB_DIR" = "." ] || [ -z "$SUB_DIR" ]; then
+            TARGET="$ROOT_DIR"
+          else
+            TARGET="${ROOT_DIR%/}/$SUB_DIR"
+          fi
+          if [ ! -d "$TARGET" ]; then
+            echo "::warning::conftest-plan-from='$SUB_DIR' resolves to '$TARGET' which does not exist; falling back to '$ROOT_DIR'. Add an examples/basic caller or override conftest-plan-from."
+            TARGET="$ROOT_DIR"
+          fi
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "Using plan target: $TARGET"
+      - name: Render plan JSON
+        working-directory: ${{ steps.target.outputs.target }}
+        run: |
+          set -euo pipefail
           terraform init -backend=false
           terraform plan -out=tfplan.binary
           terraform show -json tfplan.binary > tfplan.json
-        working-directory: ${{ inputs.working-directory }}
       - name: Install and run conftest
         # NOTE: instrumenta/conftest-action@v0.5.1 does not exist on GitHub.
         # Using the upstream binary directly instead.
@@ -224,7 +248,7 @@ jobs:
           tar -xzf conftest.tar.gz conftest
           mv conftest /usr/local/bin/
           conftest --version
-          conftest test "${{ inputs.working-directory }}/tfplan.json" \
+          conftest test "${{ steps.target.outputs.target }}/tfplan.json" \
             --policy .policies/policies/ \
             --all-namespaces
 
