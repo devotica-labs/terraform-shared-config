@@ -67,6 +67,10 @@ on:
         description: "OSS gitleaks binary version (no paid license needed)"
         type: string
         default: "8.18.4"
+      conftest-version:
+        description: "Conftest binary version. Must bundle OPA >= 0.59 to understand `import rego.v1` in modern policy packs."
+        type: string
+        default: "0.56.0"
       terraform-docs-auto-update:
         description: "Bot pushes regenerated README back to the PR branch instead of failing on diff"
         type: boolean
@@ -240,9 +244,11 @@ jobs:
       - name: Install and run conftest
         # NOTE: instrumenta/conftest-action@v0.5.1 does not exist on GitHub.
         # Using the upstream binary directly instead.
+        env:
+          CONFTEST_VERSION_OVERRIDE: ${{ inputs.conftest-version }}
         run: |
           set -euo pipefail
-          CONFTEST_VERSION="0.46.0"
+          CONFTEST_VERSION="${CONFTEST_VERSION_OVERRIDE:-0.56.0}"
           curl -sSLo conftest.tar.gz \
             "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
           tar -xzf conftest.tar.gz conftest
