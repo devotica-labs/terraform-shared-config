@@ -141,6 +141,7 @@ The full module-CI gauntlet — fmt, validate, lint, sec, policy, test, docs, ex
 |---|---|---|---|
 | `terraform-version` | string | `1.9.5` | Pin for `hashicorp/setup-terraform` |
 | `working-directory` | string | `.` | Module root (use when the repo nests modules) |
+| `conftest-plan-from` | string | `examples/basic` | Subpath under `working-directory` to render the conftest plan from. Module roots have required variables and cannot be planned in isolation, so we plan an example caller. Set to `"."` only for modules with no required vars |
 | `run-terraform-test` | bool | `true` | Runs `terraform test -filter=…` for every file listed in `terraform-test-files` (default unit + contract) |
 | `terraform-test-files` | string (JSON array) | `'["tests/unit.tftest.hcl","tests/contract.tftest.hcl"]'` | Override when test files are named differently or split into more layers |
 | `run-tflint` | bool | `true` | tflint with AWS plugin, recursive |
