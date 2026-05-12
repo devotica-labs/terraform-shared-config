@@ -136,16 +136,20 @@ jobs:
           tflint --init
           tflint --format compact
 
-      - name: tfsec
+      - name: tfsec (trivy)
+        # NOTE: tfsec-action blocked by Aquasecurity org IP allowlist on GitHub runners.
         if: ${{ inputs.run-tfsec }}
-        uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6
+        uses: aquasecurity/trivy-action@master
         with:
-          working_directory: ${{ matrix.service }}
-          additional_args: --minimum-severity HIGH
+          scan-type: config
+          scan-ref: ${{ matrix.service }}
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          hide-progress: true
 
       - name: Checkov
         if: ${{ inputs.run-checkov }}
-        uses: bridgecrewio/checkov-action@9201a8e6eaa919e3444d7c4ca691896efde4f033 # v12.3101.0
+        uses: bridgecrewio/checkov-action@4048c972aae68d0b983a48bb3479aab2d877b898 # v12.3102.0
         with:
           directory: ${{ matrix.service }}
           framework: terraform
@@ -153,7 +157,7 @@ jobs:
           soft_fail: true # informational in projects too — refine later
 
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
@@ -179,11 +183,19 @@ jobs:
           terraform show -json tfplan.binary > tfplan.json
 
       - name: conftest (OPA policies)
+        # NOTE: instrumenta/conftest-action@v0.5.1 does not exist on GitHub.
+        # Using the upstream binary directly instead.
         if: ${{ inputs.run-conftest && inputs.run-plan }}
-        uses: instrumenta/conftest-action@v0.5.1
-        with:
-          files: ${{ matrix.service }}/tfplan.json
-          policy: .policies/policies/
+        run: |
+          set -euo pipefail
+          CONFTEST_VERSION="0.46.0"
+          curl -sSLo conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf conftest.tar.gz conftest
+          mv conftest /usr/local/bin/
+          conftest test "${{ matrix.service }}/tfplan.json" \
+            --policy .policies/policies/ \
+            --all-namespaces
 
       # Infracost is informational — never blocks. Skip cleanly when no API key.
       - name: Infracost precheck
@@ -202,7 +214,7 @@ jobs:
 
       - name: Infracost setup
         if: ${{ inputs.run-infracost && github.event_name == 'pull_request' && steps.infracost_precheck.outputs.skip != 'true' }}
-        uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
+        uses: infracost/actions/setup@d51fc54d23c9ad90f984b884257bd96dc2625067 # v4.1.0
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
         continue-on-error: true

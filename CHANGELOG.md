@@ -6,6 +6,13 @@ This file is managed by [release-please](https://github.com/googleapis/release-p
 
 The repo follows semantic versioning. Consumers pin to `@v1` (recommended) or to an exact `@v1.x.y`. The floating `v1` tag is repointed to the latest `v1.x.y` on every release.
 
+## [1.0.3](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.2...v1.0.3) (2026-05-12)
+
+
+### Bug Fixes
+
+* replace tfsec-action with trivy, conftest-action with binary ([#19](https://github.com/devotica-labs/terraform-shared-config/issues/19)) ([7a15017](https://github.com/devotica-labs/terraform-shared-config/commit/7a1501712154f4089cd49dcfe426fc450f8dff5e))
+
 ## [1.0.2](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.1...v1.0.2) (2026-05-08)
 
 ### Bug Fixes
