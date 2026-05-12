@@ -6,6 +6,13 @@ This file is managed by [release-please](https://github.com/googleapis/release-p
 
 The repo follows semantic versioning. Consumers pin to `@v1` (recommended) or to an exact `@v1.x.y`. The floating `v1` tag is repointed to the latest `v1.x.y` on every release.
 
+## [1.0.4](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.3...v1.0.4) (2026-05-12)
+
+
+### Bug Fixes
+
+* **conftest:** plan from examples/basic instead of module root ([#21](https://github.com/devotica-labs/terraform-shared-config/issues/21)) ([49c8dab](https://github.com/devotica-labs/terraform-shared-config/commit/49c8dab0e776d0b28ef685c0f0d2f0871d1c9e76))
+
 ## [1.0.3](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.2...v1.0.3) (2026-05-12)
 
 
