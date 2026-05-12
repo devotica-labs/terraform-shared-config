@@ -6,6 +6,13 @@ This file is managed by [release-please](https://github.com/googleapis/release-p
 
 The repo follows semantic versioning. Consumers pin to `@v1` (recommended) or to an exact `@v1.x.y`. The floating `v1` tag is repointed to the latest `v1.x.y` on every release.
 
+## [1.0.7](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.6...v1.0.7) (2026-05-12)
+
+
+### Bug Fixes
+
+* **project-ci:** bump conftest to 0.56.0 to support 'import rego.v1' ([#28](https://github.com/devotica-labs/terraform-shared-config/issues/28)) ([8125bf0](https://github.com/devotica-labs/terraform-shared-config/commit/8125bf0060cc2bed556e8993bad1ce3399bb73e9))
+
 ## [1.0.6](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.5...v1.0.6) (2026-05-12)
 
 
