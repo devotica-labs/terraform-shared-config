@@ -91,10 +91,18 @@ jobs:
             <(echo "${TAG_NAME}")
 
       # ---------- CycloneDX SBOM ----------
-      - uses: CycloneDX/gh-terraform-provider-action@e25f96e4e9e7fbe6a4d57c78c7f1ba6c4a8c8ed5 # v1.0.0
+      # anchore/sbom-action wraps syft and emits CycloneDX JSON for any
+      # source directory. Module repos have no language runtime so the
+      # SBOM is mostly Terraform/provider lockfile contents — auditable
+      # provenance for the release artifact.
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0  # TODO: SHA-pin in a follow-up
         with:
-          project-directory: .
-          output-file: "${{ needs.release-please.outputs.tag_name }}.cdx.json"
+          path: .
+          format: cyclonedx-json
+          output-file: ${{ needs.release-please.outputs.tag_name }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
       # ---------- Attach to GitHub Release ----------
       - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2.0.5
