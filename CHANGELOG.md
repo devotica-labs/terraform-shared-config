@@ -6,6 +6,14 @@ This file is managed by [release-please](https://github.com/googleapis/release-p
 
 The repo follows semantic versioning. Consumers pin to `@v1` (recommended) or to an exact `@v1.x.y`. The floating `v1` tag is repointed to the latest `v1.x.y` on every release.
 
+## [1.0.5](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.4...v1.0.5) (2026-05-12)
+
+
+### Bug Fixes
+
+* **conftest:** bump from 0.46.0 → 0.56.0 to support 'import rego.v1' ([#23](https://github.com/devotica-labs/terraform-shared-config/issues/23)) ([3312b79](https://github.com/devotica-labs/terraform-shared-config/commit/3312b790cf7b5aa0b2a2c0c47a10565ee577784f))
+* **release:** replace fictional CycloneDX action with anchore/sbom-action ([#25](https://github.com/devotica-labs/terraform-shared-config/issues/25)) ([f8b0bbb](https://github.com/devotica-labs/terraform-shared-config/commit/f8b0bbb3aa13da6314f5739dccf0757757c11df1))
+
 ## [1.0.4](https://github.com/devotica-labs/terraform-shared-config/compare/v1.0.3...v1.0.4) (2026-05-12)
 
 
