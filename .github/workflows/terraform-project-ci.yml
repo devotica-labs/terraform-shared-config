@@ -60,6 +60,10 @@ on:
       conftest-policy-ref:
         type: string
         default: "v1"
+      conftest-version:
+        description: "OPA conftest binary version. 0.56.0+ required for policies using 'import rego.v1'."
+        type: string
+        default: "0.56.0"
       gitleaks-version:
         description: "OSS gitleaks binary version (no paid license needed)"
         type: string
@@ -185,15 +189,20 @@ jobs:
       - name: conftest (OPA policies)
         # NOTE: instrumenta/conftest-action@v0.5.1 does not exist on GitHub.
         # Using the upstream binary directly instead.
+        # Version is driven by inputs.conftest-version (default 0.56.0) so
+        # consumers can pin if needed. 0.56.0+ is required for any policy
+        # that uses 'import rego.v1' — older binaries reject the import path.
         if: ${{ inputs.run-conftest && inputs.run-plan }}
+        env:
+          CONFTEST_VERSION: ${{ inputs.conftest-version }}
+          SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
-          CONFTEST_VERSION="0.46.0"
           curl -sSLo conftest.tar.gz \
             "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
           tar -xzf conftest.tar.gz conftest
           mv conftest /usr/local/bin/
-          conftest test "${{ matrix.service }}/tfplan.json" \
+          conftest test "${SERVICE}/tfplan.json" \
             --policy .policies/policies/ \
             --all-namespaces
 
