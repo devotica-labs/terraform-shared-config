@@ -1,0 +1,19 @@
+terraform-shared-config
+Copyright 2026 Devotica Labs
+
+This product includes software developed at Devotica Labs
+(https://github.com/devotica-labs).
+
+================================================================================
+
+This repo publishes the central reusable GitHub Actions workflows consumed by
+every other Devotica Terraform repository: terraform-module-ci.yml (called by
+module repos like terraform-aws-vpc / terraform-aws-iam / terraform-aws-s3)
+and terraform-project-ci.yml (called by project repos like sample-infra).
+
+Consumers pin against the floating @v1 tag which is repointed on every release.
+
+================================================================================
+
+Third-party components and their licenses are documented in CHANGELOG.md and
+inline where used.
